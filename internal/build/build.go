@@ -164,6 +164,12 @@ func (s *Session) Evaluate(ctx context.Context) error {
 			s.metadata.Detail = err.Error()
 			return err
 		}
+		if input.Type != "" && input.Type != snapshot.Type {
+			err := fmt.Errorf("input %s is %s, want %s: %s", input.Name, snapshot.Type, input.Type, input.Path)
+			s.metadata.Reason = ir.BuildReasonInputMissing
+			s.metadata.Detail = err.Error()
+			return err
+		}
 		s.inputs = append(s.inputs, snapshot)
 	}
 	sort.Slice(s.inputs, func(i, j int) bool { return s.inputs[i].Name < s.inputs[j].Name })
@@ -290,11 +296,20 @@ func (s *Session) NewAttempt(retry int) (map[string]string, string, error) {
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return nil, "", err
 	}
+	resolvedOutput, err := ResolvePath(s.outputPath, "", true)
+	if err != nil {
+		return nil, "", err
+	}
 	base := truncateToken(filepath.Base(s.outputPath), maxStagingBaseLength)
-	staging := filepath.Join(filepath.Dir(s.outputPath), fmt.Sprintf(".%s.dagu-%s-%d-%s.tmp",
+	staging := filepath.Join(filepath.Dir(resolvedOutput), fmt.Sprintf(".%s.dagu-%s-%d-%s.tmp",
 		base, safeToken(s.request.AttemptID), retry, hex.EncodeToString(nonce[:])))
 	if _, err := os.Lstat(staging); err == nil || !errors.Is(err, os.ErrNotExist) {
 		return nil, "", fmt.Errorf("staging output path is not absent: %s", staging)
+	}
+	if s.output.PathType() == SnapshotTypeDirectory {
+		if err := os.Mkdir(staging, 0o700); err != nil {
+			return nil, "", err
+		}
 	}
 	return map[string]string{s.output.Name: staging}, staging, nil
 }
@@ -309,9 +324,16 @@ func (s *Session) Commit(ctx context.Context, staging string) error {
 		return fmt.Errorf("build materialization store is unavailable")
 	}
 	s.metadata.Phase = ir.BuildPhaseVerify
-	output, err := Snapshot(s.output.Name, staging)
+	finalPath, err := ResolvePath(s.outputPath, "", true)
+	if err != nil {
+		return err
+	}
+	output, err := SnapshotForPublication(s.output.Name, staging, finalPath)
 	if err != nil {
 		return fmt.Errorf("verify staged output: %w", err)
+	}
+	if output.Type != s.output.PathType() {
+		return fmt.Errorf("staged output is %s, want %s: %s", output.Type, s.output.PathType(), staging)
 	}
 	for _, expected := range s.inputs {
 		current, err := Snapshot(expected.Name, expected.Path)
@@ -359,7 +381,7 @@ func (s *Session) Close(staging string) error {
 	}
 	s.closed = true
 	if staging != "" {
-		_ = os.Remove(staging)
+		_ = os.RemoveAll(staging)
 	}
 	if s.lock != nil {
 		return s.lock.Release()

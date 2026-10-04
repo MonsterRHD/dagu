@@ -263,6 +263,87 @@ func TestPrepareBuildPlanInfersFileDependency(t *testing.T) {
 	assert.Equal(t, producerNode.Step().Outputs[0].Path, consumerNode.Step().Inputs[0].Path)
 }
 
+func TestPrepareBuildPlanInfersOverlappingDirectoryDependencies(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		output     string
+		input      string
+		wantErr    bool
+		errContain string
+	}{
+		{name: "directory to child", output: "site", input: "site/index.html"},
+		{name: "child to directory", output: "site/index.html", input: "site"},
+		{name: "overlapping outputs", output: "site", input: "", wantErr: true, errContain: "overlap and have multiple producers"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			workingDir := t.TempDir()
+			runWorkDir := t.TempDir()
+			if tt.name != "directory to child" {
+				require.NoError(t, os.MkdirAll(filepath.Join(workingDir, "site"), 0o750))
+			}
+			steps := []ir.Step{{
+				ID: "producer", Name: "producer",
+				Outputs: []ir.StepOutputDeclaration{{Name: "site", Type: ir.StepPathTypeDirectory, Path: tt.output}},
+			}}
+			if tt.input != "" {
+				steps = append(steps, ir.Step{
+					ID: "consumer", Name: "consumer",
+					Inputs: []ir.StepInputDeclaration{{Name: "site", Path: tt.input}},
+				})
+			}
+			if tt.wantErr {
+				steps = append(steps, ir.Step{
+					ID: "other", Name: "other",
+					Outputs: []ir.StepOutputDeclaration{{Name: "child", Path: "site/index.html"}},
+				})
+			}
+			plan, err := NewPlan(steps...)
+			require.NoError(t, err)
+			ctx := NewContext(context.Background(), &ir.DAG{
+				Name: "build-test", Type: ir.TypeBuild, WorkingDir: workingDir,
+			}, "run-1", filepath.Join(workingDir, "dag.log"), WithWorkDir(runWorkDir))
+			err = prepareBuildPlan(ctx, plan)
+			if tt.wantErr {
+				require.ErrorContains(t, err, tt.errContain)
+				return
+			}
+			require.NoError(t, err)
+			producerNode := plan.GetNodeByName("producer")
+			consumerNode := plan.GetNodeByName("consumer")
+			assert.True(t, plan.IsInferredDependency(producerNode.ID(), consumerNode.ID()))
+		})
+	}
+}
+
+func TestPrepareBuildPlanDependsOnAllOverlappingProducers(t *testing.T) {
+	t.Parallel()
+
+	workingDir := t.TempDir()
+	runWorkDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(workingDir, "models"), 0o750))
+	steps := []ir.Step{
+		{ID: "first", Name: "first", Outputs: []ir.StepOutputDeclaration{{Name: "model", Type: ir.StepPathTypeDirectory, Path: "models/v1"}}},
+		{ID: "second", Name: "second", Outputs: []ir.StepOutputDeclaration{{Name: "model", Type: ir.StepPathTypeDirectory, Path: "models/v2"}}},
+		{ID: "consumer", Name: "consumer", Inputs: []ir.StepInputDeclaration{{Name: "models", Path: "models"}}},
+	}
+	plan, err := NewPlan(steps...)
+	require.NoError(t, err)
+	ctx := NewContext(context.Background(), &ir.DAG{
+		Name: "build-test", Type: ir.TypeBuild, WorkingDir: workingDir,
+	}, "run-1", filepath.Join(workingDir, "dag.log"), WithWorkDir(runWorkDir))
+	require.NoError(t, prepareBuildPlan(ctx, plan))
+	consumer := plan.GetNodeByName("consumer")
+	first := plan.GetNodeByName("first")
+	second := plan.GetNodeByName("second")
+	assert.True(t, plan.IsInferredDependency(first.ID(), consumer.ID()))
+	assert.True(t, plan.IsInferredDependency(second.ID(), consumer.ID()))
+}
+
 func TestRunner_StepRetryWithDownstreamIncludesInferredBuildDescendant(t *testing.T) {
 	t.Parallel()
 
@@ -632,6 +713,68 @@ func TestBuildRunnerFingerprintsResolvedRecipe(t *testing.T) {
 	require.Equal(t, "v2", string(content))
 }
 
+func TestBuildRunnerProducesAndConsumesDirectory(t *testing.T) {
+	if gort.GOOS == "windows" {
+		t.Skip("uses a POSIX shell script")
+	}
+
+	workingDir := t.TempDir()
+	sitePath := filepath.Join(workingDir, "site")
+	verifyPath := filepath.Join(workingDir, "verify.txt")
+	store := filematerialization.New(filepath.Join(t.TempDir(), "materializations"))
+	steps := []ir.Step{
+		{
+			ID:   "producer",
+			Name: "producer",
+			Script: `mkdir -p "${outputs.site}/empty"
+printf result > "${outputs.site}/index.html"
+`,
+			Outputs: []ir.StepOutputDeclaration{{Name: "site", Type: ir.StepPathTypeDirectory, Path: sitePath}},
+		},
+		{
+			ID:   "consumer",
+			Name: "consumer",
+			Script: `cp "${inputs.site}/index.html" "${outputs.verify}"
+`,
+			Inputs:  []ir.StepInputDeclaration{{Name: "site", Type: ir.StepPathTypeDirectory, Path: sitePath}},
+			Outputs: []ir.StepOutputDeclaration{{Name: "verify", Path: verifyPath}},
+		},
+	}
+
+	run := func(runID string) (ir.BuildDecision, ir.BuildDecision) {
+		plan, err := NewPlan(steps...)
+		require.NoError(t, err)
+		dag := &ir.DAG{
+			Name:               "build-test",
+			Type:               ir.TypeBuild,
+			WorkingDir:         workingDir,
+			WorkingDirExplicit: true,
+			Shell:              "sh",
+		}
+		ctx := NewContext(context.Background(), dag, runID, filepath.Join(t.TempDir(), "dag.log"),
+			WithAttemptID(runID+"-attempt"), WithWorkDir(t.TempDir()))
+		runner := New(&Config{DAGRunID: runID, LogDir: t.TempDir(), MaterializationStore: store})
+		require.NoError(t, runner.Run(ctx, plan, nil))
+		producer := plan.GetNodeByName("producer").State().Build
+		consumer := plan.GetNodeByName("consumer").State().Build
+		require.NotNil(t, producer)
+		require.NotNil(t, consumer)
+		return producer.Decision, consumer.Decision
+	}
+
+	producerDecision, consumerDecision := run("run-1")
+	assert.Equal(t, ir.BuildDecisionExecute, producerDecision)
+	assert.Equal(t, ir.BuildDecisionExecute, consumerDecision)
+	assert.DirExists(t, filepath.Join(sitePath, "empty"))
+	content, err := os.ReadFile(verifyPath)
+	require.NoError(t, err)
+	assert.Equal(t, "result", string(content))
+
+	producerDecision, consumerDecision = run("run-2")
+	assert.Equal(t, ir.BuildDecisionReuse, producerDecision)
+	assert.Equal(t, ir.BuildDecisionReuse, consumerDecision)
+}
+
 func TestEvaluateBuildNodeReportsReusePublishFailure(t *testing.T) {
 	t.Parallel()
 
@@ -744,6 +887,67 @@ echo complete > "${outputs.artifact}"
 	stagingFiles, err := filepath.Glob(filepath.Join(workingDir, ".artifact.txt.dagu-*.tmp"))
 	require.NoError(t, err)
 	require.Empty(t, stagingFiles)
+}
+
+func TestBuildRepeatRemovesUncommittedStagingDirectory(t *testing.T) {
+	if gort.GOOS == "windows" {
+		t.Skip("uses a POSIX shell script")
+	}
+
+	workingDir := t.TempDir()
+	inputPath := filepath.Join(workingDir, "input.txt")
+	outputPath := filepath.Join(workingDir, "site")
+	counterPath := filepath.Join(workingDir, "counter")
+	require.NoError(t, os.WriteFile(inputPath, []byte("input"), 0o600))
+	step := ir.Step{
+		ID:   "build",
+		Name: "build",
+		Script: fmt.Sprintf(`
+if [ ! -f %q ]; then
+  touch %q
+  mkdir -p "${outputs.site}/empty"
+  echo partial > "${outputs.site}/partial"
+  exit 1
+fi
+mkdir -p "${outputs.site}/empty"
+echo complete > "${outputs.site}/index.html"
+`, counterPath, counterPath),
+		Inputs: []ir.StepInputDeclaration{{Name: "source", Path: inputPath}},
+		Outputs: []ir.StepOutputDeclaration{{
+			Name: "site", Type: ir.StepPathTypeDirectory, Path: outputPath,
+		}},
+		ContinueOn: ir.ContinueOn{
+			Failure:     true,
+			MarkSuccess: true,
+			ExitCode:    []int{1},
+		},
+		RepeatPolicy: ir.RepeatPolicy{RepeatMode: ir.RepeatModeUntil},
+	}
+	plan, err := NewPlan(step)
+	require.NoError(t, err)
+	runner := New(&Config{
+		DAGRunID:             "run-1",
+		LogDir:               t.TempDir(),
+		MaterializationStore: filematerialization.New(filepath.Join(t.TempDir(), "materializations")),
+	})
+	dag := &ir.DAG{
+		Name:               "build-test",
+		Type:               ir.TypeBuild,
+		WorkingDir:         workingDir,
+		WorkingDirExplicit: true,
+		Shell:              "sh",
+	}
+	ctx := NewContext(context.Background(), dag, "run-1", filepath.Join(workingDir, "dag.log"))
+
+	require.NoError(t, runner.Run(ctx, plan, nil))
+	content, err := os.ReadFile(filepath.Join(outputPath, "index.html"))
+	require.NoError(t, err)
+	require.Equal(t, "complete\n", string(content))
+	require.NoFileExists(t, filepath.Join(outputPath, "partial"))
+	assert.DirExists(t, filepath.Join(outputPath, "empty"))
+	stagingPaths, err := filepath.Glob(filepath.Join(workingDir, ".site.dagu-*.tmp"))
+	require.NoError(t, err)
+	require.Empty(t, stagingPaths)
 }
 
 func TestPrepareBuildPlanRejectsInferredCycle(t *testing.T) {

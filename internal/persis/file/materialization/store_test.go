@@ -473,7 +473,7 @@ func TestRestorePreviousPreservesUnknownFinal(t *testing.T) {
 				require.NoError(t, os.WriteFile(backupPath, []byte("previous"), 0o600))
 			}
 
-			err = restorePrevious(journal)
+			err = restorePrevious(journal, false)
 			require.Error(t, err)
 			content, readErr := os.ReadFile(finalPath)
 			require.NoError(t, readErr)

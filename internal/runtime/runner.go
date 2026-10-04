@@ -653,7 +653,7 @@ ExecRepeat: // repeat execution
 		isRetriable := r.handleNodeExecutionError(ctx, plan, node, execErr)
 		if isRetriable {
 			if stagingPath != "" {
-				_ = os.Remove(stagingPath)
+				_ = os.RemoveAll(stagingPath)
 				stagingPath = ""
 			}
 			continue ExecRepeat
@@ -670,7 +670,7 @@ ExecRepeat: // repeat execution
 		shouldRepeat := r.shouldRepeatNode(ctx, node, execErr)
 		if shouldRepeat && !r.isCanceled() {
 			if stagingPath != "" {
-				_ = os.Remove(stagingPath)
+				_ = os.RemoveAll(stagingPath)
 				stagingPath = ""
 			}
 			r.prepareNodeForRepeat(ctx, node, progressCh)

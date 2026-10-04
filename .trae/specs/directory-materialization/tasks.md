@@ -1,0 +1,132 @@
+# 目录树路径物化 - 实现计划
+
+## Task 1: 扩展路径输入输出声明类型
+- **Status**: `completed`
+- **Priority**: high
+- **Depends On**: None
+- **Completion Evidence**:
+  - TR-1.1 `rule`: `go test ./internal/spec/... ./internal/ir/...` 通过；新增默认/显式路径类型解析与非法类型测试。
+  - TR-1.2 `rule`: `go test ./internal/build/...` 通过；`TestRecipeDigestIncludesPathType` 验证目录输出类型改变 fingerprint。
+- **Description**:
+  - 在 IR 的路径输入/输出声明中增加路径类型字段，区分默认文件输出、显式文件和目录。
+  - 扩展 YAML 解析：路径输出接受 `type: file`、`type: directory`；路径输入接受显式文件/目录类型并保持省略时自动识别。
+  - 更新校验逻辑，拒绝路径类型与 `string`/`json` 值输出混用及非法类型。
+  - 确保 recipe 摘要包含新增声明类型，使文件/目录声明切换失效。
+- **Acceptance Criteria Addressed**: AC-1, AC-7, AC-10
+- **Test Requirements**:
+  - `rule` TR-1.1: `internal/spec` 测试验证默认输出为文件、显式 `file`/`directory` 可解析、输入目录可解析，非法类型和混用返回明确错误；证据为 `go test ./internal/spec/...`。
+  - `rule` TR-1.2: 仅改变输出路径类型时 recipe digest 改变；证据为 `internal/build` 测试。
+- **Notes**: 不新增 YAML 字段名，仅扩展现有 `type` 在 path 条目下的允许值。
+
+## Task 2: 实现稳定目录树快照与符号链接边界
+- **Status**: `completed`
+- **Priority**: high
+- **Depends On**: Task 1
+- **Completion Evidence**:
+  - TR-2.1 `rule`: `go test ./internal/build/...` 通过；新增稳定目录快照测试，覆盖相对路径、内容、空目录、类型和链接目标变化。
+  - TR-2.2 `rule`: 同上；绝对/相对/链式逃逸、链接环和命名管道均被拒绝，合法树内链接通过。
+  - TR-2.3 `rule`: `TestLegacyFileSnapshotDefaultsToFileType` 与 store 兼容读取通过；`go test ./internal/persis/file/materialization/...` 通过。
+  - TR-2.4 `rubric`: 4/5。树遍历、摘要和链接校验集中在 `internal/build/tree.go`，快照比较与路径解析仍复用现有边界；证据为上述测试和代码结构检查。
+- **Description**:
+  - 扩展 manifest/snapshot 模型以表达文件、目录和符号链接成员、相对路径、大小、内容摘要、链接目标和根摘要。
+  - 实现确定性目录遍历、成员排序、空目录记录和双轮稳定性校验。
+  - 实现树内符号链接解析，拒绝逃逸链接、链接链逃逸、链接环和非常规文件。
+  - 保持普通文件快照 API 与旧 snapshot JSON 的兼容读取。
+- **Acceptance Criteria Addressed**: AC-2, AC-3, AC-7, AC-11
+- **Test Requirements**:
+  - `rule` TR-2.1: 相同树结构重复快照摘要一致；相对路径、文件内容、空目录、成员类型和链接目标变化均改变摘要；证据为 `internal/build` 单元测试。
+  - `rule` TR-2.2: 合法树内文件/目录/符号链接通过，绝对逃逸、相对逃逸、多级链接逃逸、环和特殊成员失败；证据为 `internal/build` 单元测试。
+  - `rule` TR-2.3: 无 `type`/`entries` 的旧文件 snapshot 被规范化为普通文件；证据为 manifest 反序列化测试。
+  - `rubric` TR-2.4: 快照抽象内聚性；scale 1-5；anchors 1=遍历、哈希和安全校验耦合难测，3=功能可用但辅助函数分散，5=快照模型、确定性遍历和链接边界职责清晰；threshold >= 4；证据为代码审查和测试覆盖。
+
+## Task 3: 扩展 build 会话的目录暂存、评估和失效逻辑
+- **Status**: `completed`
+- **Priority**: high
+- **Depends On**: Task 2
+- **Completion Evidence**:
+  - TR-3.1 `rule`: `TestNewAttemptCreatesDirectoryStaging` 通过；目录暂存路径预创建且重试路径不同，`go test ./internal/build/...` 通过。
+  - TR-3.2 `rule`: `TestPrepareCommitAndReuseDirectory` 通过；提交后第二运行复用，文件内容与空目录匹配。
+  - TR-3.3 `rule`: `TestCommitDirectoryRejectsChangedInputAndWrongStagingType` 验证输入树变化导致提交失败且目标未发布。
+  - TR-3.4 `rule`: `TestDirectoryFileTypeSwitchCommitsAndReuse` 覆盖文件↔目录切换；错误根类型提交被拒绝。
+  - TR-3.5 `rule`: `TestDirectoryDryRunNoReuseAndControlDependency` 与既有 ineligible 测试通过；dry-run 不创建暂存树，no-reuse/控制依赖继续执行。
+- **Description**:
+  - 更新路径解析，使输入接受文件或目录，输出接受已存在文件/目录或不存在目标，继续拒绝根路径符号链接。
+  - 目录输出的 `NewAttempt` 创建同目录、空、唯一的暂存目录；文件输出保持暂存文件语义。
+  - Commit 前验证暂存根类型、完整树快照和所有输入快照；将新 snapshot 写入 manifest。
+  - 失败、重试和 Close 使用递归清理，避免未提交暂存树残留。
+  - 保持 dry-run、no-reuse、控制依赖、ineligible always-run、重试和旧 manifest 判断语义。
+- **Acceptance Criteria Addressed**: AC-4, AC-5, AC-6, AC-7, AC-10, AC-11
+- **Test Requirements**:
+  - `rule` TR-3.1: 文件和目录输出分别获得正确暂存路径；目录暂存路径预先存在且为空，重试路径不同；证据为 `internal/build` 测试。
+  - `rule` TR-3.2: 目录首次提交后第二次相同运行复用，最终路径、文件内容和空目录均匹配；证据为 `go test ./internal/build/...`。
+  - `rule` TR-3.3: 执行期间输入文件、相对路径、空目录或类型变化导致 Commit 失败且不写新 manifest；证据为 focused regression test。
+  - `rule` TR-3.4: 文件↔目录切换不会错误复用，暂存根类型错误或非法树成员导致失败；证据为 `internal/build` 测试。
+  - `rule` TR-3.5: dry-run 不创建暂存目录/锁，no-reuse 与控制依赖仍选择执行，ineligible commit 继续保留旧 manifest；证据为现有与新增 build 测试。
+
+## Task 4: 实现目录树 journal 发布、恢复和层级路径锁
+- **Status**: `completed`
+- **Priority**: high
+- **Depends On**: Task 3
+- **Completion Evidence**:
+  - TR-4.1 `rule`: `TestGetAcceptsVersionOneFileManifest` 通过；`TestCommitPublishesDirectoryAndVersionTwoManifest` 验证 v2 目录 manifest。
+  - TR-4.2 `rule`: `TestRecoverDirectoryExchangeCommit` 覆盖交换完成、交换回滚、交换前清理、首次提交清理和 backup 回退。
+  - TR-4.3 `rule`: 文件↔目录实际发布由 `TestDirectoryFileTypeSwitchCommitsAndReuses` 覆盖；未知目标保护由既有 unknown final 测试和新恢复矩阵覆盖。
+  - TR-4.4 `rule`: `TestAcquirePathsExpandsDirectoryLocksAndCleansStaging` 验证目录后代锁冲突；既有测试验证同路径共享/排他。
+  - TR-4.5 `rule`: 同一测试验证无 journal 的 `.dagu-*.tmp` 文件/目录被清理且非匹配兄弟路径保留。
+  - TR-4.6 `rubric`: 4/5。原子交换隔离在平台文件，通用 journal/回滚集中在 `tree_store.go`，锁扩展仍在 store 获取路径；证据为 macOS/Linux/Windows 测试交叉编译与上述恢复测试。
+- **Description**:
+  - 将 manifest schema 写出版本升级到新版本，同时接受并规范化 schema version 1。
+  - 扩展 journal 记录暂存路径、发布模式、旧/新树 snapshot 和旧 manifest。
+  - 在 macOS/Linux 上使用可用的原子交换原语发布目录树并支持交换回滚；不支持时使用排他锁保护的 journal 回退发布。
+  - 支持文件→目录、目录→文件、目录→目录及文件→文件恢复矩阵。
+  - 获取锁时扩展目录后代路径，保证目录读者与树内已存在写者互斥；排他恢复后清理无 journal 的本实例暂存路径。
+  - 未知目标树不得覆盖；上一份确认树和 manifest 必须保留或恢复。
+- **Acceptance Criteria Addressed**: AC-3, AC-7, AC-8, AC-9, AC-11
+- **Test Requirements**:
+  - `rule` TR-4.1: schema v1 manifest 可读且按普通文件处理，v2 新 manifest 写出目录 entries 和根类型；证据为 store 测试。
+  - `rule` TR-4.2: journal 在交换前、交换后、manifest 写入后及清理阶段中断时，均可提交新树或回滚旧树/旧 manifest；证据为恢复状态矩阵测试。
+  - `rule` TR-4.3: 文件↔目录中断恢复后目标类型、内容和 manifest 一致，未知目标导致 recovery error 且目标不变；证据为 store 测试。
+  - `rule` TR-4.4: 同路径读者共享、同路径写者排他，目录读者与目录内写者通过后代锁互斥；证据为并发锁测试。
+  - `rule` TR-4.5: 无 journal 的 `.dagu-*.tmp` 暂存文件/目录在排他恢复时清理，非本实例命名的兄弟路径不受影响；证据为 store 测试。
+  - `rubric` TR-4.6: 发布/恢复平台抽象质量；scale 1-5；anchors 1=平台分支和恢复状态交织，3=主路径可恢复但回退职责不清，5=原子交换、回退实现和 journal 状态判定可独立验证；threshold >= 4；证据为代码审查和恢复测试。
+
+## Task 5: 接入 runtime 规划、环境变量和重试清理
+- **Status**: `completed`
+- **Priority**: high
+- **Depends On**: Task 4
+- **Completion Evidence**:
+  - TR-5.1 `rule`: `TestPrepareBuildPlanInfersOverlappingDirectoryDependencies` 与 `TestBuildRunnerProducesAndConsumesDirectory` 验证目录生产者到消费者推断依赖和最终路径读取。
+  - TR-5.2 `rule`: 同一测试覆盖祖先/后代重叠排序及重叠输出报错；`go test ./internal/runtime/...` 通过。
+  - TR-5.3 `rule`: `TestBuildRunnerProducesAndConsumesDirectory` 两运行验证 `${outputs.site}` 暂存目录、`${inputs.site}` 消费和第二运行 reuse。
+  - TR-5.4 `rule`: `TestBuildRepeatRemovesUncommittedStagingDirectory` 验证失败重试递归清理暂存树且目标只保留完整新树。
+- **Description**:
+  - 在 build plan 中保留/解析路径类型，校验目录输入输出根类型与声明一致。
+  - 将相同目录路径继续推断为依赖，并把祖先/后代目录重叠解析为依赖或明确验证错误。
+  - 确保 `${inputs.<name>}`、`${outputs.<name>}` 和 `${steps.<id>.outputs.<name>}` 对目录路径端到端可用。
+  - 将执行失败、重试和中止路径上的暂存文件清理改为适配目录树。
+- **Acceptance Criteria Addressed**: AC-1, AC-4, AC-10, AC-12
+- **Test Requirements**:
+  - `rule` TR-5.1: 目录生产者到同路径消费者产生 inferred edge，消费者在生产者成功后看到最终目录；证据为 runtime plan 测试。
+  - `rule` TR-5.2: 目录与后代输出/输入重叠被正确排序或拒绝，多个生产者仍报错；证据为 runtime plan 测试。
+  - `rule` TR-5.3: 本地命令在 `${outputs.<name>}` 暂存目录中创建文件和空目录，下游可通过 `${inputs.<name>}` 读取并在第二次运行复用；证据为 runtime 或 `internal/intg` 测试。
+  - `rule` TR-5.4: 目录尝试失败和重试不会残留旧暂存树，最终目标在失败后保持旧树；证据为 runtime retry 测试。
+
+## Task 6: 更新规范说明并完成回归验证
+- **Status**: `completed`
+- **Priority**: medium
+- **Depends On**: Task 5
+- **Completion Evidence**:
+  - TR-6.1 `rule`: `go test ./internal/build/... ./internal/persis/file/materialization/... ./internal/runtime/... ./internal/spec/... ./internal/ir/...` 与 `go test -race -count=1 ./internal/build/... ./internal/persis/file/materialization/...` 通过。
+  - TR-6.2 `rule`: `make fmt` 完成，Go/WINDOWS/darwin linter 均报告 0 issues；Windows/Linux 测试交叉编译通过；`git status --short` 仅显示本功能相关文件。
+  - TR-6.3 `rule`: 最终 `make conformance` 通过。
+  - TR-6.4 `rubric`: 4/5。`specs/033-build-workflows.md` 与 MCP 参考同步更新，变更集中在 build/materialization/runtime/spec；第三轮独立审查在 `review.md` 中记录为 pass。
+- **Description**:
+  - 更新 `specs/033-build-workflows.md` 中路径声明、目录指纹、暂存、发布、恢复和兼容性说明。
+  - 运行受影响 Go 包测试、格式检查和必要的 broader test。
+  - 检查公开错误文案、MCP/帮助说明中仍准确描述 build path 能力，仅在必要处做最小更新。
+- **Acceptance Criteria Addressed**: AC-1, AC-2, AC-3, AC-4, AC-5, AC-6, AC-7, AC-8, AC-9, AC-10, AC-11, AC-12, AC-13
+- **Test Requirements**:
+  - `rule` TR-6.1: `go test ./internal/build/... ./internal/persis/file/materialization/... ./internal/runtime/... ./internal/spec/...` 通过；证据为命令输出。
+  - `rule` TR-6.2: `make fmt` 完成且检查其 diff 只包含本任务相关 Go 变更；证据为 git diff 和命令输出。
+  - `rule` TR-6.3: 如语义或 CLI 行为需要，运行 `make conformance`；如不运行需记录原因；证据为命令输出或任务记录。
+  - `rubric` TR-6.4: 变更最小性与文档一致性；scale 1-5；anchors 1=无关模块/文档被广泛修改，3=功能完整但说明滞后，5=规范、代码和测试同步且无无关改动；threshold >= 4；证据为独立代码审查。

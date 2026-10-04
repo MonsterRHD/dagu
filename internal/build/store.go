@@ -12,7 +12,7 @@ import (
 )
 
 // MaterializationSchemaVersion identifies the persisted manifest format.
-const MaterializationSchemaVersion = 1
+const MaterializationSchemaVersion = 2
 
 var (
 	// ErrMaterializationNotFound indicates that no committed manifest exists.
@@ -40,12 +40,15 @@ type MaterializationLock interface {
 	Release() error
 }
 
-// FileSnapshot is a verified regular-file content snapshot.
+// FileSnapshot is a verified file or directory content snapshot.
 type FileSnapshot struct {
-	Name   string `json:"name"`
-	Path   string `json:"path"`
-	Size   int64  `json:"size"`
-	Digest string `json:"digest"`
+	Name       string      `json:"name"`
+	Path       string      `json:"path"`
+	Type       string      `json:"type,omitempty"`
+	Size       int64       `json:"size"`
+	Digest     string      `json:"digest"`
+	RootDigest string      `json:"rootDigest,omitempty"`
+	Entries    []PathEntry `json:"entries,omitempty"`
 }
 
 // Materialization records one committed build output.

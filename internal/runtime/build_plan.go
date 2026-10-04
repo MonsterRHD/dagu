@@ -5,8 +5,11 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/dagucloud/dagu/v2/internal/cmn/runenv"
@@ -49,6 +52,9 @@ func prepareBuildPlan(ctx context.Context, plan *Plan) error {
 			if err != nil {
 				return fmt.Errorf("step %s input %s: %w", step.Name, step.Inputs[idx].Name, err)
 			}
+			if err := validateDeclaredInputType(step.Inputs[idx]); err != nil {
+				return fmt.Errorf("step %s input %s: %w", step.Name, step.Inputs[idx].Name, err)
+			}
 			declaredPaths[pathKeys.ComparisonKey(step.Inputs[idx].Path)] = fmt.Sprintf("build input %s declared by %s", step.Inputs[idx].Name, step.Name)
 		}
 		for idx := range step.Outputs {
@@ -75,12 +81,24 @@ func prepareBuildPlan(ctx context.Context, plan *Plan) error {
 		}
 		for _, input := range step.Inputs {
 			for _, output := range step.Outputs {
-				if output.Path != "" && pathKeys.ComparisonKey(input.Path) == pathKeys.ComparisonKey(output.Path) {
-					return fmt.Errorf("step %s declares the same path as input and output: %s", step.Name, input.Path)
+				if output.Path != "" && pathsOverlap(pathKeys.ComparisonKey(input.Path), pathKeys.ComparisonKey(output.Path)) {
+					return fmt.Errorf("step %s declares overlapping input and output paths: %s", step.Name, input.Path)
 				}
 			}
 		}
 		node.SetStep(step)
+	}
+
+	outputKeys := make([]string, 0, len(producers))
+	for key := range producers {
+		outputKeys = append(outputKeys, key)
+	}
+	for idx, left := range outputKeys {
+		for _, right := range outputKeys[idx+1:] {
+			if pathsOverlap(left, right) {
+				return fmt.Errorf("build output paths %s and %s overlap and have multiple producers", left, right)
+			}
+		}
 	}
 
 	for _, node := range plan.Nodes() {
@@ -94,7 +112,8 @@ func prepareBuildPlan(ctx context.Context, plan *Plan) error {
 		}
 
 		for _, input := range node.Step().Inputs {
-			if producer, ok := producers[pathKeys.ComparisonKey(input.Path)]; ok {
+			inputKey := pathKeys.ComparisonKey(input.Path)
+			for _, producer := range overlappingProducers(producers, inputKey) {
 				if err := plan.AddInferredDependency(producer, node.Name()); err != nil {
 					return fmt.Errorf("infer dependency %s -> %s: %w", producer, node.Name(), err)
 				}
@@ -109,6 +128,65 @@ func buildDeclaredPathBase(dag *ir.DAG, runtimeWorkingDir string) string {
 		return runtimeWorkingDir
 	}
 	return dag.WorkingDir
+}
+
+func validateDeclaredInputType(input ir.StepInputDeclaration) error {
+	if input.Type == "" {
+		return nil
+	}
+	info, err := os.Lstat(input.Path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	switch input.Type {
+	case ir.StepPathTypeDirectory:
+		if !info.IsDir() {
+			return fmt.Errorf("%s is not a directory", input.Path)
+		}
+	case ir.StepPathTypeFile:
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("%s is not a regular file", input.Path)
+		}
+	}
+	return nil
+}
+
+func pathsOverlap(left, right string) bool {
+	return pathContains(left, right) || pathContains(right, left)
+}
+
+func pathContains(parent, child string) bool {
+	relative, err := filepath.Rel(parent, child)
+	if err != nil {
+		return false
+	}
+	return relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)))
+}
+
+func overlappingProducers(producers map[string]string, inputKey string) []string {
+	result := make([]string, 0)
+	for outputKey, producer := range producers {
+		if pathsOverlap(outputKey, inputKey) {
+			result = append(result, producer)
+		}
+	}
+	sort.Strings(result)
+	return result
+}
+
+func overlappingDeclaration(declared map[string]string, pathKey string) (string, bool) {
+	if declaration, ok := declared[pathKey]; ok {
+		return declaration, true
+	}
+	for declaredKey, declaration := range declared {
+		if pathsOverlap(declaredKey, pathKey) {
+			return declaration, true
+		}
+	}
+	return "", false
 }
 
 type buildRedirect struct {
@@ -215,7 +293,7 @@ func validateBuildRedirectAliases(
 		} else if !filepath.IsAbs(resolved) {
 			resolved = filepath.Join(base, resolved)
 		}
-		if declaration, ok := declaredPaths[pathKeys.ComparisonKey(filepath.Clean(resolved))]; ok {
+		if declaration, ok := overlappingDeclaration(declaredPaths, pathKeys.ComparisonKey(filepath.Clean(resolved))); ok {
 			return fmt.Errorf("step %s %s path aliases %s: %s", step.Name, redirect.field, declaration, resolved)
 		}
 	}

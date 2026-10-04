@@ -72,7 +72,7 @@ type step struct {
 	OutputSchema any `yaml:"output_schema,omitempty"`
 	// Outputs declares named step outputs.
 	Outputs any `yaml:"outputs,omitempty"`
-	// Inputs declares named regular-file inputs for build execution.
+	// Inputs declares named file or directory inputs for build execution.
 	Inputs any `yaml:"inputs,omitempty"`
 	// Dependencies declares DAG-local files required by the step.
 	Dependencies types.StringOrArray `yaml:"dependencies,omitempty"`
@@ -1211,22 +1211,30 @@ func parseDeclaredOutputs(raw any) ([]ir.StepOutputDeclaration, error) {
 
 		outputType := ir.StepDeclaredOutputTypeString
 		if rawType, ok := obj["type"]; ok {
-			if outputPath != "" {
-				return nil, fmt.Errorf("outputs[%d]: type and path cannot be used together", idx)
-			}
 			str, ok := rawType.(string)
 			if !ok {
 				return nil, fmt.Errorf("outputs[%d]: type must be a string", idx)
 			}
 			outputType = strings.TrimSpace(str)
-			switch outputType {
-			case ir.StepDeclaredOutputTypeString, ir.StepDeclaredOutputTypeJSON:
-			default:
-				return nil, fmt.Errorf("outputs[%d]: type must be %q or %q",
-					idx, ir.StepDeclaredOutputTypeString, ir.StepDeclaredOutputTypeJSON)
+			if outputPath != "" {
+				switch outputType {
+				case ir.StepPathTypeFile:
+					outputType = ""
+				case ir.StepPathTypeDirectory:
+				default:
+					return nil, fmt.Errorf("outputs[%d]: path type must be %q or %q",
+						idx, ir.StepPathTypeFile, ir.StepPathTypeDirectory)
+				}
+			} else {
+				switch outputType {
+				case ir.StepDeclaredOutputTypeString, ir.StepDeclaredOutputTypeJSON:
+				default:
+					return nil, fmt.Errorf("outputs[%d]: type must be %q or %q",
+						idx, ir.StepDeclaredOutputTypeString, ir.StepDeclaredOutputTypeJSON)
+				}
 			}
 		}
-		if outputPath != "" {
+		if outputPath != "" && outputType != ir.StepPathTypeDirectory {
 			outputType = ""
 		}
 
@@ -1258,7 +1266,7 @@ func buildStepDeclaredInputs(_ stepBuildContext, s *step) ([]ir.StepInputDeclara
 			return nil, fmt.Errorf("inputs[%d]: %w", idx, err)
 		}
 		for key := range obj {
-			if key != "name" && key != "path" {
+			if key != "name" && key != "path" && key != "type" {
 				return nil, fmt.Errorf("inputs[%d]: unknown field %q", idx, key)
 			}
 		}
@@ -1289,8 +1297,22 @@ func buildStepDeclaredInputs(_ stepBuildContext, s *step) ([]ir.StepInputDeclara
 		if pathValue == "" {
 			return nil, fmt.Errorf("inputs[%d]: path must not be empty", idx)
 		}
+		inputType := ""
+		if rawType, exists := obj["type"]; exists {
+			typeValue, ok := rawType.(string)
+			if !ok {
+				return nil, fmt.Errorf("inputs[%d]: type must be a string", idx)
+			}
+			inputType = strings.TrimSpace(typeValue)
+			switch inputType {
+			case ir.StepPathTypeFile, ir.StepPathTypeDirectory:
+			default:
+				return nil, fmt.Errorf("inputs[%d]: path type must be %q or %q",
+					idx, ir.StepPathTypeFile, ir.StepPathTypeDirectory)
+			}
+		}
 		seen[name] = struct{}{}
-		result = append(result, ir.StepInputDeclaration{Name: name, Path: pathValue})
+		result = append(result, ir.StepInputDeclaration{Name: name, Type: inputType, Path: pathValue})
 	}
 	return result, nil
 }

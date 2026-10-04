@@ -4,11 +4,8 @@
 package build
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -16,40 +13,50 @@ import (
 	"strings"
 )
 
-// Snapshot hashes a stable regular-file snapshot.
+// Snapshot hashes a stable file or directory snapshot.
 func Snapshot(name, path string) (FileSnapshot, error) {
 	for range 3 {
-		before, err := os.Lstat(path)
+		info, err := os.Lstat(path)
 		if err != nil {
 			return FileSnapshot{}, err
 		}
-		if !before.Mode().IsRegular() {
-			return FileSnapshot{}, fmt.Errorf("%s is not a regular non-symlink file", path)
-		}
-		file, err := os.Open(path) //nolint:gosec
-		if err != nil {
-			return FileSnapshot{}, err
-		}
-		hash := sha256.New()
-		_, copyErr := io.Copy(hash, file)
-		closeErr := file.Close()
-		if copyErr != nil {
-			return FileSnapshot{}, copyErr
-		}
-		if closeErr != nil {
-			return FileSnapshot{}, closeErr
-		}
-		after, err := os.Lstat(path)
-		if err != nil {
-			return FileSnapshot{}, err
-		}
-		if os.SameFile(before, after) && before.Size() == after.Size() && before.ModTime().Equal(after.ModTime()) {
+		switch {
+		case info.Mode().IsRegular():
+			digestValue, size, err := hashRegularFileAt(path, info)
+			if err != nil {
+				return FileSnapshot{}, err
+			}
 			return FileSnapshot{
-				Name: name, Path: path, Size: after.Size(), Digest: "sha256:" + hex.EncodeToString(hash.Sum(nil)),
+				Name: name, Path: path, Type: SnapshotTypeFile, Size: size, Digest: digestValue,
 			}, nil
+		case info.IsDir():
+			snapshot, err := snapshotDirectory(name, path, path)
+			if err == nil {
+				return snapshot, nil
+			}
+			if !errors.Is(err, errPathChanged) {
+				return FileSnapshot{}, err
+			}
+		default:
+			return FileSnapshot{}, fmt.Errorf("%s is not a regular file or non-symlink directory", path)
 		}
 	}
-	return FileSnapshot{}, fmt.Errorf("file changed while hashing: %s", path)
+	return FileSnapshot{}, fmt.Errorf("%w: %s", errPathChanged, path)
+}
+
+// SnapshotForPublication validates staging content while enforcing the final root boundary.
+func SnapshotForPublication(name, stagingPath, finalPath string) (FileSnapshot, error) {
+	info, err := os.Lstat(stagingPath)
+	if err != nil {
+		return FileSnapshot{}, err
+	}
+	if info.IsDir() {
+		return snapshotDirectory(name, stagingPath, finalPath)
+	}
+	if info.Mode().IsRegular() {
+		return Snapshot(name, stagingPath)
+	}
+	return FileSnapshot{}, fmt.Errorf("%s is not a regular file or directory", stagingPath)
 }
 
 func snapshotsEqual(left, right []FileSnapshot) bool {
@@ -64,8 +71,20 @@ func snapshotsEqual(left, right []FileSnapshot) bool {
 	return true
 }
 
+func SnapshotsEqual(left, right FileSnapshot) bool {
+	return snapshotEqual(left, right)
+}
+
 func snapshotEqual(left, right FileSnapshot) bool {
-	return left.Name == right.Name && left.Path == right.Path && left.Size == right.Size && left.Digest == right.Digest
+	NormalizeSnapshot(&left)
+	NormalizeSnapshot(&right)
+	return left.Name == right.Name &&
+		left.Path == right.Path &&
+		left.Type == right.Type &&
+		left.Size == right.Size &&
+		left.Digest == right.Digest &&
+		left.RootDigest == right.RootDigest &&
+		entriesEqual(left.Entries, right.Entries)
 }
 
 // ResolvePath returns an absolute path with existing ancestors resolved.
@@ -91,8 +110,8 @@ func ResolvePath(raw, base string, output bool) (string, error) {
 			if info.Mode()&os.ModeSymlink != 0 {
 				return "", fmt.Errorf("output path must not be a symlink: %s", path)
 			}
-			if !info.Mode().IsRegular() {
-				return "", fmt.Errorf("output path must be a regular file: %s", path)
+			if !info.Mode().IsRegular() && !info.IsDir() {
+				return "", fmt.Errorf("output path must be a regular file or directory: %s", path)
 			}
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return "", err

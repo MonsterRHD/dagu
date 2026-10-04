@@ -3913,6 +3913,42 @@ steps:
 	assert.Equal(t, []ir.StepOutputDeclaration{{Name: "artifact", Path: "artifact.txt"}}, dag.Steps[0].Outputs)
 }
 
+func TestLoadBuildStepDirectoryPathTypes(t *testing.T) {
+	t.Parallel()
+
+	dag, err := LoadYAML(context.Background(), []byte(`
+type: build
+working_dir: .
+steps:
+  - id: build
+    name: build
+    run: echo build
+    inputs:
+      - name: site
+        type: directory
+        path: site
+      - name: metadata
+        type: file
+        path: metadata.json
+    outputs:
+      - name: artifact
+        type: directory
+        path: dist
+`), WithoutEval())
+	require.NoError(t, err)
+	require.Len(t, dag.Steps, 1)
+	assert.Equal(t, []ir.StepInputDeclaration{
+		{Name: "site", Type: ir.StepPathTypeDirectory, Path: "site"},
+		{Name: "metadata", Type: ir.StepPathTypeFile, Path: "metadata.json"},
+	}, dag.Steps[0].Inputs)
+	assert.Equal(t, []ir.StepOutputDeclaration{{
+		Name: "artifact",
+		Type: ir.StepPathTypeDirectory,
+		Path: "dist",
+	}}, dag.Steps[0].Outputs)
+	assert.Equal(t, ir.StepPathTypeDirectory, dag.Steps[0].Outputs[0].PathType())
+}
+
 func TestLoadBuildStepPathValidation(t *testing.T) {
 	t.Parallel()
 
@@ -3935,7 +3971,7 @@ steps:
 			wantDetail: "declares build paths",
 		},
 		{
-			name: "path and value type are mutually exclusive",
+			name: "path output rejects value type",
 			yaml: `
 type: build
 working_dir: .
@@ -3948,7 +3984,39 @@ steps:
         type: string
         path: artifact.txt
 `,
-			wantDetail: "type and path",
+			wantDetail: "path type must be",
+		},
+		{
+			name: "path output rejects unknown type",
+			yaml: `
+type: build
+working_dir: .
+steps:
+  - id: build
+    name: build
+    run: echo build
+    outputs:
+      - name: artifact
+        type: symlink
+        path: artifact
+`,
+			wantDetail: "path type must be",
+		},
+		{
+			name: "path input rejects unknown type",
+			yaml: `
+type: build
+working_dir: .
+steps:
+  - id: build
+    name: build
+    run: echo build
+    inputs:
+      - name: source
+        type: symlink
+        path: source
+`,
+			wantDetail: "path type must be",
 		},
 		{
 			name: "relative paths require stable base",

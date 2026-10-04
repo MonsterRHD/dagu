@@ -74,7 +74,7 @@ type Step struct {
 	OutputSchema map[string]any `json:"outputSchema,omitzero"`
 	// Outputs declares named step outputs.
 	Outputs []StepOutputDeclaration `json:"outputs,omitempty"`
-	// Inputs declares named regular-file inputs for build execution.
+	// Inputs declares named file or directory inputs for build execution.
 	Inputs []StepInputDeclaration `json:"inputs,omitempty"`
 	// Dependencies declares DAG-local files required by the step.
 	Dependencies []string `json:"dependencies,omitempty"`
@@ -141,6 +141,9 @@ const (
 	StepDeclaredOutputTypeString = "string"
 	StepDeclaredOutputTypeJSON   = "json"
 
+	StepPathTypeFile      = "file"
+	StepPathTypeDirectory = "directory"
+
 	// StepDeclaredOutputSourceCapture marks an output published from the step's
 	// captured output. An empty source means the step writes the value to
 	// DAGU_OUTPUT_FILE.
@@ -178,6 +181,8 @@ type StepOutputsConfig struct {
 // StepOutputDeclaration defines one named value or path-backed output.
 type StepOutputDeclaration struct {
 	Name string `json:"name"`
+	// Type is string/json for value outputs, or directory for path outputs.
+	// Empty with Path set means a regular file.
 	Type string `json:"type,omitempty"`
 	Path string `json:"path,omitempty"`
 	// Source names the channel that publishes the value. An empty source means
@@ -185,10 +190,22 @@ type StepOutputDeclaration struct {
 	Source string `json:"source,omitempty"`
 }
 
-// StepInputDeclaration defines one named regular-file input.
+// StepInputDeclaration defines one named file or directory input.
 type StepInputDeclaration struct {
 	Name string `json:"name"`
+	// Type empty means auto-detect; it may be file or directory.
+	Type string `json:"type,omitempty"`
 	Path string `json:"path"`
+}
+
+func (s StepOutputDeclaration) PathType() string {
+	if s.Path == "" {
+		return ""
+	}
+	if s.Type == StepPathTypeDirectory {
+		return StepPathTypeDirectory
+	}
+	return StepPathTypeFile
 }
 
 // PathOutput returns the path-backed output and whether exactly one exists.
