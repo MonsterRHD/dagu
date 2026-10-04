@@ -383,6 +383,20 @@ func (a *API) RenameDAG(ctx context.Context, request api.RenameDAGRequestObject)
 
 	dag, err := a.dagRepository.GetMetadata(ctx, request.FileName)
 	if err != nil {
+		// The source name may be gone because this rename already completed or
+		// was interrupted after the durable switch. Recognize the same request
+		// idempotently (or finish recovering it) before reporting not found.
+		if a.dagRenameCoordinator != nil {
+			_, found, recoverErr := a.dagRenameCoordinator.LookupOrRecover(
+				ctx, request.FileName, request.Body.NewFileName, currentActorID(ctx),
+			)
+			switch {
+			case recoverErr == nil && found:
+				return api.RenameDAG200Response{}, nil
+			case recoverErr != nil && !errors.Is(recoverErr, persis.ErrDAGNotFound) && !errors.Is(recoverErr, os.ErrNotExist):
+				return nil, fmt.Errorf("failed to recover DAG rename: %w", recoverErr)
+			}
+		}
 		return nil, &Error{
 			HTTPStatus: http.StatusNotFound,
 			Code:       api.ErrorCodeNotFound,
@@ -410,6 +424,20 @@ func (a *API) RenameDAG(ctx context.Context, request api.RenameDAGRequestObject)
 		}
 	}
 
+	if a.dagRenameCoordinator != nil {
+		// Crash-safe single publication: definition and run configuration are
+		// staged, switched together, and published once. A failed or
+		// interrupted rename is reconciled by the next request or restart.
+		if _, err := a.dagRenameCoordinator.Rename(
+			ctx, request.FileName, request.Body.NewFileName, currentActorID(ctx),
+		); err != nil {
+			return nil, fmt.Errorf("failed to rename DAG: %w", err)
+		}
+		return api.RenameDAG200Response{}, nil
+	}
+
+	// Fallback for environments without a persistent state directory: the
+	// definition switch is immediate and settings migration is best-effort.
 	if err := a.dagRepository.Rename(ctx, request.FileName, request.Body.NewFileName); err != nil {
 		return nil, fmt.Errorf("failed to move DAG: %w", err)
 	}

@@ -52,6 +52,33 @@ func (r *DAGRepository) Rename(ctx context.Context, oldID, newID string) error {
 	return r.store.Rename(ctx, oldID, newID)
 }
 
+// DAGRenameStore is implemented by definition stores that split rename into a
+// mutation-free preparation phase and a durable switch, which lets callers
+// stage a crash-safe single publication across the definition and its
+// associated run configuration.
+type DAGRenameStore interface {
+	PrepareRename(ctx context.Context, oldID, newID string) error
+	CommitRename(ctx context.Context, oldID, newID string) error
+}
+
+// PrepareRename validates a rename without modifying the definition store.
+// Stores without the split rename contract have no preparation step.
+func (r *DAGRepository) PrepareRename(ctx context.Context, oldID, newID string) error {
+	if rs, ok := r.store.(DAGRenameStore); ok {
+		return rs.PrepareRename(ctx, oldID, newID)
+	}
+	return nil
+}
+
+// CommitRename durably switches a prepared rename. Stores without the split
+// rename contract apply the rename directly.
+func (r *DAGRepository) CommitRename(ctx context.Context, oldID, newID string) error {
+	if rs, ok := r.store.(DAGRenameStore); ok {
+		return rs.CommitRename(ctx, oldID, newID)
+	}
+	return r.store.Rename(ctx, oldID, newID)
+}
+
 func (r *DAGRepository) GetMetadata(ctx context.Context, id string) (*ir.DAG, error) {
 	return r.store.GetMetadata(ctx, id)
 }

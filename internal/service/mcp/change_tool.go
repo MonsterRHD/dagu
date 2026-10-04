@@ -339,10 +339,20 @@ func nullableString(value string) any {
 
 func (svc *Service) changeRenameDAG(ctx context.Context, input changeInput) (*mcpsdk.CallToolResult, map[string]any, error) {
 	if _, err := svc.getDAGSpec(ctx, input.Name); err != nil {
-		return nil, nil, err
+		// In apply mode the source may already be gone because this exact
+		// rename completed earlier; the API recognizes the duplicate and
+		// reports success instead of a missing source.
+		if input.Mode != changeModeApply || !isDAGNotFound(err) {
+			return nil, nil, err
+		}
 	}
 	if _, err := svc.getDAGSpec(ctx, input.NewName); err == nil {
-		return nil, nil, persis.ErrDAGAlreadyExists
+		// In apply mode let the API decide: an existing destination matching a
+		// completed rename is an idempotent success, any other occupant is a
+		// conflict.
+		if input.Mode != changeModeApply {
+			return nil, nil, persis.ErrDAGAlreadyExists
+		}
 	} else if !isDAGNotFound(err) {
 		return nil, nil, err
 	}

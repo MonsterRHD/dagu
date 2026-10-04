@@ -505,34 +505,6 @@ func fileName(id string) string {
 	return dagindex.SuspendFlagName(id)
 }
 
-// Rename renames a DAG from oldID to newID.
-func (store *Store) Rename(ctx context.Context, oldID, newID string) error {
-	resolved, err := store.locateDAG(ctx, oldID)
-	if err != nil {
-		return fmt.Errorf("failed to locate DAG %s: %w", oldID, err)
-	}
-	if resolved.ExternalSymlink {
-		return fmt.Errorf("%w: external DAG file symlink", persis.ErrDAGReadOnly)
-	}
-	oldFilePath := resolved.EntryPath
-	newFilePath := store.generateFilePath(newID)
-	exceptPath := ""
-	if store.recursive {
-		if relPath, ok := relativeToBase(store.baseDir, oldFilePath); ok {
-			newFilePath = fileutil.EnsureYAMLExtension(filepath.Join(filepath.Dir(oldFilePath), filepath.Base(newID)))
-			exceptPath = relPath
-		}
-	}
-	if fileExists(newFilePath) || store.recursive && store.stemExists(newID, exceptPath) {
-		return persis.ErrDAGAlreadyExists
-	}
-	if err := fileutil.Rename(oldFilePath, newFilePath); err != nil {
-		return err
-	}
-	store.invalidateIndex()
-	return nil
-}
-
 // generateFilePath generates the file path for a DAG by its name.
 // It uses filepath.Base to strip directory components and verifies
 // the result stays inside baseDir to prevent path traversal.

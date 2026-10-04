@@ -688,6 +688,10 @@ func NewServer(setup ServerConfig, opts ...ServerOption) (*Server, error) {
 
 	srv.apiV1 = apiv1.New(dr, dagRunRepository, qs, processes, drm, cfg, cc, sr, mr, rs, allAPIOptions...)
 
+	if err := srv.apiV1.RecoverPendingDAGRenames(ctx); err != nil {
+		logger.Warn(ctx, "Failed to recover pending DAG renames", tag.Error(err))
+	}
+
 	return srv, nil
 }
 

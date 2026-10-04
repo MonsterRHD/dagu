@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -22,6 +23,7 @@ import (
 	"github.com/dagucloud/dagu/v2/internal/cmn/logger"
 	"github.com/dagucloud/dagu/v2/internal/cmn/logger/tag"
 	cmnvalue "github.com/dagucloud/dagu/v2/internal/cmn/value"
+	"github.com/dagucloud/dagu/v2/internal/dagrename"
 	"github.com/dagucloud/dagu/v2/internal/dagrun"
 	"github.com/dagucloud/dagu/v2/internal/dagsettings"
 	"github.com/dagucloud/dagu/v2/internal/dispatch"
@@ -91,6 +93,7 @@ type API struct {
 	tunnelService        *tunnel.Service
 	defaultExecMode      config.ExecutionMode
 	dagWritesDisabled    bool // True when git sync read-only mode is active
+	dagRenameCoordinator *dagrename.Coordinator
 	baseConfigStore      dagsettings.BaseConfigStore
 	dagSettingsStore     dagsettings.Store
 	wikiStore            wiki.PageStore
@@ -434,6 +437,25 @@ func New(
 	// When enabled with push disabled, DAG write operations are blocked
 	a.dagWritesDisabled = cfg.GitSync.Enabled && !cfg.GitSync.PushEnabled
 
+	if cfg.Paths.DataDir != "" {
+		a.dagRenameCoordinator = dagrename.New(dagrename.Config{
+			StateDir:    filepath.Join(cfg.Paths.DataDir, "dag-renames"),
+			Definitions: dr,
+			Settings:    a.dagSettingsStore,
+			Publish: func(ctx context.Context, event dagrename.Event) {
+				a.notifyDAGMutation(event.NewName)
+				details := map[string]any{
+					"old_name": event.OldName,
+					"new_name": event.NewName,
+				}
+				if event.ActorID != "" {
+					details["subject_id"] = event.ActorID
+				}
+				a.logAudit(ctx, audit.CategoryDAG, "dag_rename", details)
+			},
+		})
+	}
+
 	return a
 }
 
@@ -447,6 +469,15 @@ func (a *API) notifyDAGMutation(fileName string) {
 	if a.dagMutationNotifier != nil {
 		a.dagMutationNotifier(fileName)
 	}
+}
+
+// RecoverPendingDAGRenames converges DAG renames interrupted by a crash or a
+// failed step before the server starts serving rename requests.
+func (a *API) RecoverPendingDAGRenames(ctx context.Context) error {
+	if a.dagRenameCoordinator == nil {
+		return nil
+	}
+	return a.dagRenameCoordinator.RecoverAll(ctx)
 }
 
 func (a *API) notifyWikiMutation() {

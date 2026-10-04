@@ -64,6 +64,7 @@ steps:
   - run: echo existing
 `)))
 	cfg := &config.Config{}
+	cfg.Paths.DataDir = t.TempDir()
 	cfg.Server.Permissions = map[config.Permission]bool{config.PermissionWriteDAGs: true}
 	api := frontendapi.New(
 		store,
@@ -111,6 +112,22 @@ steps:
 	spec, err := store.GetSpec(ctx, rename.NewName)
 	require.NoError(t, err)
 	require.Contains(t, spec, "name: mcp-original")
+
+	// Replaying the same applied rename is recognized as the completed
+	// operation and succeeds idempotently.
+	replayed := callTool(t, ctx, session, toolChange, rename)
+	require.False(t, replayed.IsError)
+	require.Equal(t, true, structuredMap(t, replayed)["applied"])
+
+	// A different DAG taking over the occupied new name remains a conflict.
+	usurp := callTool(t, ctx, session, toolChange, changeInput{
+		Type:    changeTypeRenameDAG,
+		Name:    "mcp-existing",
+		NewName: "mcp-renamed",
+		Mode:    changeModeApply,
+	})
+	require.True(t, usurp.IsError)
+	require.Equal(t, changeErrorConflict, structuredMap(t, usurp)["code"])
 
 	remove := changeInput{Type: changeTypeDeleteDAG, Name: rename.NewName}
 	preview = callTool(t, ctx, session, toolChange, remove)
