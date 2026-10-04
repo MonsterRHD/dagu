@@ -47,15 +47,12 @@ func WithSkipDefault(skip bool) Option {
 }
 
 // New creates a new file-based base config store.
-// The filePath is the full path to the base.yaml file.
+// The filePath is the full path to the base.yaml file. Constructing a store
+// performs no filesystem mutations, so read-only callers (including candidate
+// validation) never create directories; the parent is created on first write.
 func New(filePath string, opts ...Option) (*Store, error) {
 	if filePath == "" {
 		return nil, errors.New("filebaseconfig: filePath cannot be empty")
-	}
-
-	dir := filepath.Dir(filePath)
-	if err := os.MkdirAll(dir, 0750); err != nil {
-		return nil, fmt.Errorf("filebaseconfig: failed to create directory %s: %w", dir, err)
 	}
 
 	s := &Store{filePath: filePath}
@@ -64,6 +61,14 @@ func New(filePath string, opts ...Option) (*Store, error) {
 	}
 
 	return s, nil
+}
+
+// ensureParentDir creates the parent of the config file.
+func (s *Store) ensureParentDir() error {
+	if err := os.MkdirAll(filepath.Dir(s.filePath), 0750); err != nil {
+		return fmt.Errorf("filebaseconfig: failed to create directory for %s: %w", s.filePath, err)
+	}
+	return nil
 }
 
 // Initialize ensures a default base config exists for first-time users.
@@ -79,6 +84,9 @@ func (s *Store) Initialize() error {
 	markerFile := filepath.Join(dir, ".base-config-created")
 	if fileutil.FileExists(markerFile) {
 		return nil
+	}
+	if err := s.ensureParentDir(); err != nil {
+		return err
 	}
 	if err := fileutil.WriteFileAtomic(s.filePath, []byte(defaultBaseConfig), filePermissions); err != nil {
 		return fmt.Errorf("filebaseconfig: failed to create default base config: %w", err)
@@ -118,6 +126,9 @@ func (s *Store) UpdateSpec(_ context.Context, spec []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if err := s.ensureParentDir(); err != nil {
+		return err
+	}
 	if err := fileutil.WriteFileAtomic(s.filePath, spec, filePermissions); err != nil {
 		return fmt.Errorf("filebaseconfig: failed to write file: %w", err)
 	}

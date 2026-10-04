@@ -8,11 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/dagucloud/dagu/v2/internal/agentsession"
+	"github.com/dagucloud/dagu/v2/internal/baseconfig"
 	"github.com/dagucloud/dagu/v2/internal/cmn/config"
 	"github.com/dagucloud/dagu/v2/internal/cmn/logger"
 	"github.com/dagucloud/dagu/v2/internal/cmn/logger/tag"
@@ -56,12 +58,32 @@ Example:
 
 var serverFlags = []commandLineFlag{dagsFlag, hostFlag, portFlag, tunnelFlag, tunnelTokenFlag, tunnelFunnelFlag, tunnelHTTPSFlag}
 
+// baseConfigStateDir returns the directory holding candidate generations and
+// the promotion lock. It stays under the data directory so it can never be
+// observed as a workflow or a live base config by the scheduler file watches.
+func baseConfigStateDir(cfg *config.Config) string {
+	return filepath.Join(cfg.Paths.DataDir, "baseconfig-generation")
+}
+
 const localAgentSessionShutdownTimeout = 10 * time.Second
 
 func newServer(ctx *Context, rs *resource.Service, stores frontend.Stores, opts ...frontend.ServerOption) (*frontend.Server, error) {
 	coordinatorClient, err := ctx.NewCoordinatorClient()
 	if err != nil {
 		return nil, err
+	}
+	if stores.BaseConfig != nil && stores.WorkspaceBaseConfig != nil && stores.BaseConfigPromoter == nil &&
+		ctx.Config.Paths.DataDir != "" && ctx.Persistence.DAGRepository != nil {
+		promoter, err := baseconfig.New(ctx.Context, baseconfig.Config{
+			StateDir:   baseConfigStateDir(ctx.Config),
+			Live:       baseconfig.NewDAGSettingsLiveStores(stores.BaseConfig, stores.WorkspaceBaseConfig),
+			Enumerator: baseconfig.NewPersisEnumerator(ctx.Persistence.DAGRepository),
+			Builder:    baseconfig.NewSpecBuilder(),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize base config promoter: %w", err)
+		}
+		stores.BaseConfigPromoter = promoter
 	}
 	return frontend.NewServer(frontend.ServerConfig{
 		Context:              ctx.Context,

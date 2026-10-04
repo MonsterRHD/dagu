@@ -18,6 +18,7 @@ import (
 	"github.com/dagucloud/dagu/v2/api/v1"
 	"github.com/dagucloud/dagu/v2/internal/audit"
 	"github.com/dagucloud/dagu/v2/internal/auth"
+	"github.com/dagucloud/dagu/v2/internal/baseconfig"
 	"github.com/dagucloud/dagu/v2/internal/cmn/config"
 	"github.com/dagucloud/dagu/v2/internal/cmn/logger"
 	"github.com/dagucloud/dagu/v2/internal/cmn/logger/tag"
@@ -92,6 +93,7 @@ type API struct {
 	defaultExecMode      config.ExecutionMode
 	dagWritesDisabled    bool // True when git sync read-only mode is active
 	baseConfigStore      dagsettings.BaseConfigStore
+	baseConfigPromoter   BaseConfigPromoter
 	dagSettingsStore     dagsettings.Store
 	wikiStore            wiki.PageStore
 	workspaceWikiMu      sync.RWMutex
@@ -244,6 +246,24 @@ func WithTunnelService(ts *tunnel.Service) APIOption {
 func WithBaseConfigStore(store dagsettings.BaseConfigStore) APIOption {
 	return func(a *API) {
 		a.baseConfigStore = store
+	}
+}
+
+// BaseConfigPromoter validates candidate base config generations against
+// affected workflows and atomically promotes them.
+type BaseConfigPromoter interface {
+	Submit(
+		ctx context.Context,
+		scope baseconfig.Scope,
+		candidate []byte,
+	) (*baseconfig.Outcome, error)
+}
+
+// WithBaseConfigPromoter wires the candidate-generation promoter used by the
+// base config update endpoints.
+func WithBaseConfigPromoter(promoter BaseConfigPromoter) APIOption {
+	return func(a *API) {
+		a.baseConfigPromoter = promoter
 	}
 }
 
@@ -438,8 +458,14 @@ func New(
 }
 
 func (a *API) requireValidBaseConfigWiring() {
-	if a.baseConfigStore != nil && a.baseConfigProvider == nil {
+	if a.baseConfigStore == nil {
+		return
+	}
+	if a.baseConfigProvider == nil {
 		panic("api: workspace base config provider must be configured when base config store is configured")
+	}
+	if a.baseConfigPromoter == nil {
+		panic("api: base config promoter must be configured when base config store is configured")
 	}
 }
 

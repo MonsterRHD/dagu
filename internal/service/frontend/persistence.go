@@ -6,6 +6,7 @@ package frontend
 import (
 	"github.com/dagucloud/dagu/v2/internal/audit"
 	authmodel "github.com/dagucloud/dagu/v2/internal/auth"
+	"github.com/dagucloud/dagu/v2/internal/baseconfig"
 	"github.com/dagucloud/dagu/v2/internal/dagsettings"
 	"github.com/dagucloud/dagu/v2/internal/eventstore"
 	"github.com/dagucloud/dagu/v2/internal/incident"
@@ -25,6 +26,7 @@ import (
 type Stores struct {
 	WorkspaceBaseConfig  dagsettings.BaseConfigProvider
 	BaseConfig           dagsettings.BaseConfigStore
+	BaseConfigPromoter   *baseconfig.Manager
 	AuthService          *authservice.Service
 	UserStore            authmodel.UserStore
 	AuthSetupRequired    bool

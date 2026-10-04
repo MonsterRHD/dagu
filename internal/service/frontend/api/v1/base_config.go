@@ -11,6 +11,7 @@ import (
 
 	"github.com/dagucloud/dagu/v2/api/v1"
 	"github.com/dagucloud/dagu/v2/internal/audit"
+	"github.com/dagucloud/dagu/v2/internal/baseconfig"
 	"github.com/dagucloud/dagu/v2/internal/cmn/logger"
 	"github.com/dagucloud/dagu/v2/internal/cmn/logger/tag"
 	"github.com/dagucloud/dagu/v2/internal/dagsettings"
@@ -54,6 +55,20 @@ var (
 		Message:    "Failed to save workspace base configuration",
 		HTTPStatus: http.StatusInternalServerError,
 	}
+
+	// ErrFailedToValidateBaseConfig is returned when rebuilding workflows
+	// against a candidate fails for an infrastructure reason instead of a
+	// workflow regression. The live configuration stays unchanged.
+	ErrFailedToValidateBaseConfig = &Error{
+		Code:       api.ErrorCodeInternalError,
+		Message:    "Failed to validate base configuration against workflows",
+		HTTPStatus: http.StatusInternalServerError,
+	}
+	ErrFailedToValidateWorkspaceBaseConfig = &Error{
+		Code:       api.ErrorCodeInternalError,
+		Message:    "Failed to validate workspace base configuration against workflows",
+		HTTPStatus: http.StatusInternalServerError,
+	}
 )
 
 // GetBaseConfig returns the current base DAG configuration YAML. Requires developer role or above.
@@ -94,7 +109,7 @@ func (a *API) UpdateBaseConfig(ctx context.Context, request api.UpdateBaseConfig
 		return nil, ErrInvalidRequestBody
 	}
 
-	// Validate before saving — reject on validation error.
+	// Validate standalone syntax before forming a candidate generation.
 	if errs := validateBaseConfig(ctx, request.Body.Spec); len(errs) > 0 {
 		return nil, &Error{
 			Code:       api.ErrorCodeBadRequest,
@@ -103,15 +118,16 @@ func (a *API) UpdateBaseConfig(ctx context.Context, request api.UpdateBaseConfig
 		}
 	}
 
-	if err := a.baseConfigStore.UpdateSpec(ctx, []byte(request.Body.Spec)); err != nil {
-		logger.Error(ctx, "Failed to save base config", tag.Error(err))
-		return nil, ErrFailedToSaveBaseConfig
+	outcome, err := a.baseConfigPromoter.Submit(ctx, baseconfig.GlobalScope(), []byte(request.Body.Spec))
+	if err != nil {
+		return nil, a.mapBaseConfigPromotionError(ctx, err, "global",
+			ErrFailedToSaveBaseConfig, ErrFailedToValidateBaseConfig)
 	}
 
 	a.logAudit(ctx, audit.CategorySystem, "base_config_update", nil)
 
 	return api.UpdateBaseConfig200JSONResponse{
-		Errors: []string{},
+		Errors: promotionWarnings(outcome),
 	}, nil
 }
 
@@ -174,14 +190,18 @@ func (a *API) UpdateWorkspaceBaseConfig(
 		}
 	}
 
-	store, err := a.workspaceBaseConfigStore(workspaceName)
+	scope, err := baseconfig.WorkspaceScope(workspaceName)
 	if err != nil {
-		logger.Error(ctx, "Failed to initialize workspace base config store", tag.Name(workspaceName), tag.Error(err))
-		return nil, ErrFailedToSaveWorkspaceBaseConfig
+		return nil, &Error{
+			Code:       api.ErrorCodeBadRequest,
+			Message:    err.Error(),
+			HTTPStatus: http.StatusBadRequest,
+		}
 	}
-	if err := store.UpdateSpec(ctx, []byte(request.Body.Spec)); err != nil {
-		logger.Error(ctx, "Failed to save workspace base config", tag.Name(workspaceName), tag.Error(err))
-		return nil, ErrFailedToSaveWorkspaceBaseConfig
+	outcome, err := a.baseConfigPromoter.Submit(ctx, scope, []byte(request.Body.Spec))
+	if err != nil {
+		return nil, a.mapBaseConfigPromotionError(ctx, err, workspaceName,
+			ErrFailedToSaveWorkspaceBaseConfig, ErrFailedToValidateWorkspaceBaseConfig)
 	}
 
 	a.logAudit(ctx, audit.CategoryWorkspace, "workspace_base_config_update", map[string]string{
@@ -189,12 +209,51 @@ func (a *API) UpdateWorkspaceBaseConfig(
 	})
 
 	return api.UpdateWorkspaceBaseConfig200JSONResponse{
-		Errors: []string{},
+		Errors: promotionWarnings(outcome),
 	}, nil
 }
 
+// mapBaseConfigPromotionError translates promotion failures into API errors.
+// Workflow regressions and generation fencing stay client errors (400) with
+// workflow-locatable messages; publication and infrastructure failures stay
+// server errors (500) so callers know the previous generation is still live.
+func (a *API) mapBaseConfigPromotionError(
+	ctx context.Context,
+	err error,
+	scopeLabel string,
+	publishErr *Error,
+	validationErr *Error,
+) *Error {
+	if rejected, ok := baseconfig.AsRejection(err); ok {
+		return &Error{
+			Code:       api.ErrorCodeBadRequest,
+			Message:    rejected.Error(),
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+	if errors.Is(err, baseconfig.ErrFence) {
+		return &Error{
+			Code:       api.ErrorCodeBadRequest,
+			Message:    err.Error(),
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+	logger.Error(ctx, "Failed to promote base config", tag.Name(scopeLabel), tag.Error(err))
+	if errors.Is(err, baseconfig.ErrPublish) {
+		return publishErr
+	}
+	return validationErr
+}
+
+func promotionWarnings(outcome *baseconfig.Outcome) []string {
+	if outcome == nil || len(outcome.Warnings) == 0 {
+		return []string{}
+	}
+	return append([]string(nil), outcome.Warnings...)
+}
+
 func (a *API) requireBaseConfigManagement() error {
-	if a.baseConfigStore == nil || a.baseConfigProvider == nil {
+	if a.baseConfigStore == nil || a.baseConfigProvider == nil || a.baseConfigPromoter == nil {
 		return ErrBaseConfigNotAvailable
 	}
 	return nil

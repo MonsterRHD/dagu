@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/dagucloud/dagu/v2/internal/baseconfig"
 	"github.com/dagucloud/dagu/v2/internal/cmn/config"
 	"github.com/dagucloud/dagu/v2/internal/dagsettings"
 	"github.com/dagucloud/dagu/v2/internal/ir"
@@ -87,6 +88,12 @@ func (stubBaseConfigStore) UpdateSpec(context.Context, []byte) error {
 	return nil
 }
 
+type stubBaseConfigPromoter struct{}
+
+func (stubBaseConfigPromoter) Submit(context.Context, baseconfig.Scope, []byte) (*baseconfig.Outcome, error) {
+	return &baseconfig.Outcome{Generation: 1}, nil
+}
+
 type workspaceStoreStub struct {
 	workspace.Store
 	item *workspace.Workspace
@@ -106,6 +113,9 @@ func TestRequireBaseConfigManagementRequiresWorkspaceProvider(t *testing.T) {
 	a.baseConfigProvider = func(string) (dagsettings.BaseConfigStore, error) {
 		return stubBaseConfigStore{}, nil
 	}
+	assert.ErrorIs(t, a.requireBaseConfigManagement(), ErrBaseConfigNotAvailable)
+
+	a.baseConfigPromoter = stubBaseConfigPromoter{}
 	require.NoError(t, a.requireBaseConfigManagement())
 }
 
@@ -132,11 +142,38 @@ func TestNewPanicsWhenBaseConfigStoreHasNoWorkspaceProvider(t *testing.T) {
 	)
 }
 
+func TestNewPanicsWhenBaseConfigStoreHasNoPromoter(t *testing.T) {
+	t.Parallel()
+
+	require.PanicsWithValue(t,
+		"api: base config promoter must be configured when base config store is configured",
+		func() {
+			New(
+				nil,
+				nil,
+				nil,
+				nil,
+				runtime.Manager{},
+				&config.Config{},
+				nil,
+				nil,
+				nil,
+				nil,
+				WithBaseConfigStore(stubBaseConfigStore{}),
+				WithWorkspaceBaseConfigProvider(func(string) (dagsettings.BaseConfigStore, error) {
+					return stubBaseConfigStore{}, nil
+				}),
+			)
+		},
+	)
+}
+
 func TestGetWorkspaceBaseConfigUsesProvider(t *testing.T) {
 	t.Parallel()
 
 	a := &API{
 		baseConfigStore: stubBaseConfigStore{},
+		baseConfigPromoter: stubBaseConfigPromoter{},
 		baseConfigProvider: func(name string) (dagsettings.BaseConfigStore, error) {
 			assert.Equal(t, "operations", name)
 			return stubBaseConfigStore{spec: "max_active_runs: 2\n"}, nil

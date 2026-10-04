@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"sort"
 	"strings"
 
 	"dario.cat/mergo"
@@ -55,6 +56,30 @@ func WithBaseConfig(baseDAG string) LoadOption {
 func WithBaseConfigContent(content []byte) LoadOption {
 	return func(o *buildOpts) {
 		o.BaseConfigContent = content
+	}
+}
+
+// BaseConfigContentSources replaces the global base config file and the
+// workspace override directory with in-memory content. It lets callers build
+// workflows against candidate configurations without publishing them to the
+// live locations.
+//
+// GlobalContent is the candidate global base config; empty content means no
+// global base. WorkspaceOverride resolves the override for a document's
+// workspace label: a missing override (ok == false or empty content) is
+// treated the same as an absent workspace base config file.
+type BaseConfigContentSources struct {
+	GlobalContent     []byte
+	WorkspaceOverride func(workspaceName string) (content []byte, ok bool)
+}
+
+// WithBaseConfigContentSources supplies global and per-workspace base config
+// content directly. When set, neither the base config file path nor the
+// workspace base config directory are read. Unlike WithBaseConfigContent,
+// workspace overrides remain effective and are resolved per document.
+func WithBaseConfigContentSources(sources BaseConfigContentSources) LoadOption {
+	return func(o *buildOpts) {
+		o.BaseConfigSources = &sources
 	}
 }
 
@@ -594,6 +619,9 @@ func loadBaseDefinition(opts buildOpts) (*baseDefinition, error) {
 
 // readBaseDefinitionData returns the source and label for the base manifest.
 func readBaseDefinitionData(opts buildOpts) (*baseConfigSource, string, error) {
+	if opts.BaseConfigSources != nil {
+		return parseBaseConfig(opts.BaseConfigSources.GlobalContent), "base config", nil
+	}
 	if len(opts.BaseConfigContent) > 0 {
 		return parseBaseConfig(opts.BaseConfigContent), "embedded base config", nil
 	}
@@ -671,12 +699,23 @@ func loadEffectiveBaseDefinition(opts buildOpts, doc map[string]any, base *baseD
 
 // readWorkspaceBaseDefinitionData returns the base source for a named workspace DAG.
 func readWorkspaceBaseDefinitionData(opts buildOpts, doc map[string]any) (*baseConfigSource, error) {
-	if opts.WorkspaceBaseConfigDir == "" || len(opts.BaseConfigContent) > 0 {
+	workspaceName := workspaceNameFromDocument(doc)
+	if workspaceName == "" {
 		return nil, nil
 	}
 
-	workspaceName := workspaceNameFromDocument(doc)
-	if workspaceName == "" {
+	if opts.BaseConfigSources != nil {
+		if opts.BaseConfigSources.WorkspaceOverride == nil {
+			return nil, nil
+		}
+		content, ok := opts.BaseConfigSources.WorkspaceOverride(workspaceName)
+		if !ok || len(content) == 0 {
+			return nil, nil
+		}
+		return parseBaseConfig(content), nil
+	}
+
+	if opts.WorkspaceBaseConfigDir == "" || len(opts.BaseConfigContent) > 0 {
 		return nil, nil
 	}
 
@@ -688,6 +727,32 @@ func readWorkspaceBaseDefinitionData(opts buildOpts, doc map[string]any) (*baseC
 		return nil, fmt.Errorf("failed to read workspace base config %q: %w", workspaceName, err)
 	}
 	return source, nil
+}
+
+// WorkspaceLabelsFromDocuments returns the distinct valid workspace labels
+// found across every document in a (possibly multi-document) YAML stream.
+// Invalid or ambiguous labels are ignored, matching build-time semantics.
+// A parse failure yields no labels.
+func WorkspaceLabelsFromDocuments(data []byte) []string {
+	docs, err := decodeDocuments(data)
+	if err != nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var names []string
+	for _, doc := range docs {
+		name := workspaceNameFromDocument(doc.data)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func workspaceNameFromDocument(doc map[string]any) string {

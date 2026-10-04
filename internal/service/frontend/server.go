@@ -370,8 +370,9 @@ func NewServer(setup ServerConfig, opts ...ServerOption) (*Server, error) {
 		apiOpts = append(apiOpts, apiv1.WithSyncService(syncSvc))
 	}
 
-	if stores.BaseConfig != nil {
+	if stores.BaseConfig != nil && stores.BaseConfigPromoter != nil {
 		apiOpts = append(apiOpts, apiv1.WithBaseConfigStore(stores.BaseConfig))
+		apiOpts = append(apiOpts, apiv1.WithBaseConfigPromoter(stores.BaseConfigPromoter))
 	}
 
 	// Initialize the workspace store before OIDC provisioning so login-time

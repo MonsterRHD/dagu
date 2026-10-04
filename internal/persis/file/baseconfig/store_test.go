@@ -22,7 +22,7 @@ func TestNew(t *testing.T) {
 		require.Error(t, err)
 	})
 
-	t.Run("creates parent directory", func(t *testing.T) {
+	t.Run("does not create parent directory until written", func(t *testing.T) {
 		dir := filepath.Join(t.TempDir(), "sub", "dir")
 		filePath := filepath.Join(dir, "base.yaml")
 
@@ -30,6 +30,10 @@ func TestNew(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, store)
 
+		_, err = os.Stat(dir)
+		assert.True(t, os.IsNotExist(err))
+
+		require.NoError(t, store.UpdateSpec(context.Background(), []byte("env: []\n")))
 		info, err := os.Stat(dir)
 		require.NoError(t, err)
 		assert.True(t, info.IsDir())

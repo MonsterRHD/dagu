@@ -112,6 +112,12 @@ type buildOpts struct {
 	// BaseConfigContent is the raw base config YAML content.
 	// When set, this takes precedence over Base file path.
 	BaseConfigContent []byte
+	// BaseConfigSources supplies base config content from memory instead of
+	// reading the global file and workspace override directory. It is used to
+	// validate candidate configurations against workflow YAML without writing
+	// them to the live locations. Workspace overrides are resolved per
+	// document from the document's workspace label.
+	BaseConfigSources *BaseConfigContentSources
 	// WorkspaceBaseConfigDir contains per-workspace base configs at <workspace>/base.yaml.
 	WorkspaceBaseConfigDir string
 	// Parameters specifies the Parameters to the DAG.
